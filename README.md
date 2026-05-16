@@ -1,4 +1,4 @@
-# DREAM Artifact
+# CACTUS Artifact
 
 ## Steps to compile and run
 - Clone this repository
