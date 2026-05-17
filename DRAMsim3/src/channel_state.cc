@@ -1,6 +1,10 @@
 #include "channel_state.h"
 #include "fmt/format.h"
 
+#include <algorithm>
+#include <numeric>
+#include <random>
+
 namespace dramsim3 {
 ChannelState::ChannelState(const Config& config, const Timing& timing, SimpleStats& simple_stats, int channel)
     : rank_idle_cycles(config.ranks, 0),
@@ -56,21 +60,34 @@ ChannelState::ChannelState(const Config& config, const Timing& timing, SimpleSta
     }
 
     // [CACTUS]
-    cactus_size_ = config_.cactus_policy == 0
-                       ? config_.rows
-                       : (config_.rows + config_.cactus_k - 1) / config_.cactus_k;
+    cactus_size_ = config_.rows;
     cactus_.resize(config_.ranks * cactus_size_, 0);
     cactus_prev_.resize(config_.ranks * cactus_size_, 0);
-    for (uint32_t i = 0; i < config_.ranks * config_.bankgroups * config_.banks_per_group * config_.cactus_k; i++)
+    uint32_t total_banks = config_.ranks * config_.bankgroups * config_.banks_per_group;
+    cactus_row_perms_.resize(total_banks * config_.rows);
+    cactus_inv_row_perms_.resize(total_banks * config_.rows);
+    std::mt19937 rng(1337);
+    for (uint32_t bank_idx = 0; bank_idx < total_banks; bank_idx++)
     {
-        cactus_random_masks.push_back(rand() % cactus_size_);
+        auto perm_begin = cactus_row_perms_.begin() + bank_idx * config_.rows;
+        auto perm_end = perm_begin + config_.rows;
+        std::iota(perm_begin, perm_end, 0);
+
+        if (config_.cactus_policy == 1)
+        {
+            std::shuffle(perm_begin, perm_end, rng);
+        }
+
+        auto inv_begin = cactus_inv_row_perms_.begin() + bank_idx * config_.rows;
+        for (uint32_t counter_idx = 0; counter_idx < config_.rows; counter_idx++)
+        {
+            inv_begin[perm_begin[counter_idx]] = counter_idx;
+        }
     }
     cactus_pending_counter_idx_.resize(config_.ranks, -1);
     cactus_alert_pending_.resize(config_.ranks, false);
     cactus_last_alert_clk_.resize(config_.ranks, 0);
     cactus_rfm_inflight_.resize(config_.ranks, false);
-    cactus_rearm_pending_.resize(config_.ranks, false);
-    cactus_rearm_seen_activate_.resize(config_.ranks, false);
     cactus_acts_since_rfm_.resize(config_.ranks, 0);
 
     if (config_.dream_mode == 1)
@@ -189,6 +206,12 @@ void ChannelState::dream_preact(uint32_t rank, uint32_t bankgroup, uint32_t bank
     }
 }
 
+uint32_t ChannelState::get_cactus_bank_idx(uint32_t rank, uint32_t bankgroup, uint32_t bank) const
+{
+    return rank * config_.bankgroups * config_.banks_per_group +
+           bankgroup * config_.banks_per_group + bank;
+}
+
 uint32_t ChannelState::get_cactus_idx(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t rowid) const
 {
     uint32_t rank_offset = rank * cactus_size_;
@@ -200,13 +223,26 @@ uint32_t ChannelState::get_cactus_idx(uint32_t rank, uint32_t bankgroup, uint32_
 
     if (config_.cactus_policy == 1) // Random
     {
-        uint32_t groupid = rowid / config_.cactus_k;
-        uint32_t bank_idx = bankgroup * config_.banks_per_group + bank;
-        uint32_t total_banks = config_.bankgroups * config_.banks_per_group;
-        uint32_t row_num = rowid % config_.cactus_k;
-        uint32_t mask_idx = rank * total_banks + bank_idx + row_num * total_banks * config_.ranks;
-        uint32_t local_idx = (groupid ^ cactus_random_masks[mask_idx]) % cactus_size_;
-        return rank_offset + local_idx;
+        uint32_t bank_idx = get_cactus_bank_idx(rank, bankgroup, bank);
+        return rank_offset + cactus_inv_row_perms_[bank_idx * config_.rows + rowid];
+    }
+
+    AbruptExit(__FILE__, __LINE__);
+}
+
+uint32_t ChannelState::get_cactus_row_idx(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t cactus_idx) const
+{
+    uint32_t local_idx = cactus_idx - rank * cactus_size_;
+
+    if (config_.cactus_policy == 0) // Direct
+    {
+        return local_idx;
+    }
+
+    if (config_.cactus_policy == 1) // Random
+    {
+        uint32_t bank_idx = get_cactus_bank_idx(rank, bankgroup, bank);
+        return cactus_row_perms_[bank_idx * config_.rows + local_idx];
     }
 
     AbruptExit(__FILE__, __LINE__);
@@ -230,8 +266,10 @@ void ChannelState::cactus_preact(uint32_t rank, uint32_t bankgroup, uint32_t ban
 
     if (counter_val >= threshold)
     {
+        // Mirror the generic ABO behavior used by MOAT/mirza:
+        // after an RFMab completes, require a small number of ACTs before
+        // another alert can be raised on the same rank/sub-channel.
         if (cactus_alert_pending_[rank] || cactus_rfm_inflight_[rank] ||
-            cactus_rearm_pending_[rank] ||
             cactus_acts_since_rfm_[rank] < config_.ABO_delay_acts)
         {
             return;
@@ -298,6 +336,16 @@ void ChannelState::cactus_mitig(int rank)
 
     int32_t cactus_idx = cactus_pending_counter_idx_[rank];
     if (cactus_idx < 0) return;
+
+    for (int j = 0; j < config_.bankgroups; j++)
+    {
+        for (int k = 0; k < config_.banks_per_group; k++)
+        {
+            uint32_t aggressor_rowid =
+                get_cactus_row_idx(rank, j, k, static_cast<uint32_t>(cactus_idx));
+            bank_states_[rank][j][k].cactus_mitig(aggressor_rowid);
+        }
+    }
 
     cactus_prev_[cactus_idx] = cactus_[cactus_idx];
     cactus_[cactus_idx] = 0;
@@ -987,8 +1035,6 @@ void ChannelState::UpdateState(const Command& cmd, uint64_t clk)
             {
                 cactus_mitig(cmd.Rank());
                 cactus_rfm_inflight_[cmd.Rank()] = false;
-                cactus_rearm_pending_[cmd.Rank()] = true;
-                cactus_rearm_seen_activate_[cmd.Rank()] = false;
                 cactus_acts_since_rfm_[cmd.Rank()] = 0;
             }
         } else if (cmd.IsRefresh()) {
@@ -1031,26 +1077,6 @@ void ChannelState::UpdateState(const Command& cmd, uint64_t clk)
             BankNeedRefresh(cmd.Rank(), cmd.Bankgroup(), cmd.Bank(), false);
         } else if (cmd.IsDRFM()) {
             BankNeedDRFM(cmd.Rank(), cmd.Bankgroup(), cmd.Bank(), false);
-        }
-    }
-
-    if (config_.cactus_mode != 0)
-    {
-        if (cmd.cmd_type == CommandType::ACTIVATE && cactus_rearm_pending_[cmd.Rank()])
-        {
-            cactus_rearm_seen_activate_[cmd.Rank()] = true;
-        }
-
-        if ((cmd.cmd_type == CommandType::PRECHARGE ||
-             cmd.cmd_type == CommandType::READ_PRECHARGE ||
-             cmd.cmd_type == CommandType::WRITE_PRECHARGE ||
-             cmd.cmd_type == CommandType::PREab ||
-             cmd.cmd_type == CommandType::PREsb) &&
-            cactus_rearm_pending_[cmd.Rank()] &&
-            cactus_rearm_seen_activate_[cmd.Rank()])
-        {
-            cactus_rearm_pending_[cmd.Rank()] = false;
-            cactus_rearm_seen_activate_[cmd.Rank()] = false;
         }
     }
 

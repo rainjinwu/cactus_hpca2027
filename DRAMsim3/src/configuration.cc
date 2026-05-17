@@ -708,6 +708,14 @@ void Config::InitCACTUSParams() {
     cactus_k = reader.GetInteger("cactus", "cactus_k", 1);
     cactus_prev_enable = reader.GetBoolean("cactus", "cactus_prev_enable", false);
 
+    if (cactus_mode != 0 && (cactus_policy == 0 || cactus_policy == 1) &&
+        cactus_k != 1) {
+        std::cout << "[CACTUS] cactus_k is ignored for the current direct/random "
+                     "row-tuple mapping; forcing cactus_k = 1"
+                  << std::endl;
+        cactus_k = 1;
+    }
+
     cactus_th = cactus_trhd;
     if (cactus_reset == 1) {
         cactus_th = cactus_trhd / 2;

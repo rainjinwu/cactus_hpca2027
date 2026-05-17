@@ -130,16 +130,17 @@ class ChannelState {
     std::string cactus_resets_stat_;
     std::vector<uint32_t> cactus_; // Rank-wide activation counters
     std::vector<uint32_t> cactus_prev_;
-    std::vector<uint32_t> cactus_random_masks;
+    std::vector<uint32_t> cactus_row_perms_;
+    std::vector<uint32_t> cactus_inv_row_perms_;
     uint32_t cactus_size_; // Number of counters per rank
     std::vector<int32_t> cactus_pending_counter_idx_;
     std::vector<bool> cactus_alert_pending_;
     std::vector<uint64_t> cactus_last_alert_clk_;
     std::vector<bool> cactus_rfm_inflight_;
-    std::vector<bool> cactus_rearm_pending_;
-    std::vector<bool> cactus_rearm_seen_activate_;
     std::vector<int> cactus_acts_since_rfm_;
+    uint32_t get_cactus_bank_idx(uint32_t rank, uint32_t bankgroup, uint32_t bank) const;
     uint32_t get_cactus_idx(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t rowid) const;
+    uint32_t get_cactus_row_idx(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t cactus_idx) const;
     void cactus_preact(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t rowid, uint64_t clk);
     void cactus_refresh(int rank);
     void cactus_mitig(int rank);

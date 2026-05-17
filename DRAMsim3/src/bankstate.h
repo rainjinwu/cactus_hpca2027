@@ -61,6 +61,7 @@ class BankState {
     bool IsInDRFM() const;
 
     void insert_drfm(uint32_t rowid);
+    void cactus_mitig(uint32_t aggressor_rowid);
 
     int64_t hydra_check_rcc(const Command& cmd);
    private:

@@ -1,5 +1,7 @@
 #include "bankstate.h"
 
+#include <algorithm>
+
 namespace dramsim3 {
 
 BankState::BankState(const Config& config, SimpleStats& simple_stats, int rank, int bank_group, int bank)
@@ -708,6 +710,26 @@ void BankState::dream_mitig()
     drfm_mitig();
 }
 
+void BankState::cactus_mitig(uint32_t aggressor_rowid)
+{
+    auto refresh_row = [this](uint32_t rowid) {
+        prac_[rowid] = 0;
+        drfm_q_.erase(
+            std::remove_if(drfm_q_.begin(), drfm_q_.end(),
+                           [rowid](const DRFM_Q_Entry& entry) {
+                               return entry.rowid == rowid;
+                           }),
+            drfm_q_.end());
+    };
+
+    if (aggressor_rowid > 1) refresh_row(aggressor_rowid - 2);
+    if (aggressor_rowid > 0) refresh_row(aggressor_rowid - 1);
+    if (aggressor_rowid + 1 < static_cast<uint32_t>(config_.rows))
+        refresh_row(aggressor_rowid + 1);
+    if (aggressor_rowid + 2 < static_cast<uint32_t>(config_.rows))
+        refresh_row(aggressor_rowid + 2);
+}
+
 
 void BankState::mint_mitig()
 {
@@ -770,10 +792,11 @@ int64_t BankState::drfm_mitig()
     {
         if (max_entry->ctr <= drfm_q_[0].ctr)
             max_entry = drfm_q_.begin();
-    
+
+        int64_t rowid = max_entry->rowid;
         simple_stats_.Increment(mitig_used_stat_);
         drfm_q_.erase(max_entry);
-        return max_entry->rowid;
+        return rowid;
     }
     else
     {
