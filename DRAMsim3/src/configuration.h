@@ -172,6 +172,9 @@ class Config {
     int tABO_act;             // the time for ABO to be activated
     int ABO_delay_acts;       // the number of ACTs before ABO is triggered
     int tABO_PW;              // the pulse width of ABO
+    int tref_enable;           // use REFab slack for CACTUS mitigation
+    int tref_mode;             // 0: absorb pending RFMab, 1: greedy max-counter mitigation
+    int tref_interval;         // REFab period for greedy max-counter mitigation
 
     // [MOAT] parameters
     int moat_mode;

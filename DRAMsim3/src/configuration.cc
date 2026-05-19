@@ -612,6 +612,9 @@ void Config::InitALERTParams() {
     tABO_act = reader.GetInteger("alert", "tABO_act", 432); // 180ns * 2.4GHz = 432
     ABO_delay_acts = reader.GetInteger("alert", "ABO_delay_acts", 1);
     tABO_PW = reader.GetInteger("alert", "tABO_PW", 640);
+    tref_enable = reader.GetInteger("alert", "tref_enable", 0);
+    tref_mode = reader.GetInteger("alert", "tref_mode", 0);
+    tref_interval = reader.GetInteger("alert", "tref_interval", 4);
 
     std::cout << "[ALERT] alert_mode: " << alert_mode << std::endl;
     if (alert_mode != 0)
@@ -620,6 +623,9 @@ void Config::InitALERTParams() {
         std::cout << "[ALERT] tABO_act: " << tABO_act << std::endl;
         std::cout << "[ALERT] ABO_delay_acts: " << ABO_delay_acts << std::endl;
         std::cout << "[ALERT] tABO_PW: " << tABO_PW << std::endl;
+        std::cout << "[ALERT] tref_enable: " << tref_enable << std::endl;
+        std::cout << "[ALERT] tref_mode: " << tref_mode << std::endl;
+        std::cout << "[ALERT] tref_interval: " << tref_interval << std::endl;
         std::cout << "[RFM] tRFM: " << tRFM << std::endl;
     }
 

@@ -89,6 +89,8 @@ ChannelState::ChannelState(const Config& config, const Timing& timing, SimpleSta
     cactus_last_alert_clk_.resize(config_.ranks, 0);
     cactus_rfm_inflight_.resize(config_.ranks, false);
     cactus_acts_since_rfm_.resize(config_.ranks, 0);
+    cactus_tref_refab_count_.resize(config_.ranks, 0);
+    cactus_tref_max_counter_idx_.resize(config_.ranks, -1);
 
     if (config_.dream_mode == 1)
     {
@@ -264,6 +266,27 @@ void ChannelState::cactus_preact(uint32_t rank, uint32_t bankgroup, uint32_t ban
         threshold *= 2;
     }
 
+    if (config_.tref_enable == 1 && config_.tref_mode == 1)
+    {
+        // Greedy max tracking: each ACT already reads/updates one CACTUS
+        // counter, so keep a single best-so-far register per rank instead of
+        // scanning all counters at every REFab.
+        int32_t max_idx = cactus_tref_max_counter_idx_[rank];
+        uint32_t max_val = 0;
+        if (max_idx >= 0)
+        {
+            max_val = cactus_[max_idx];
+            if (config_.cactus_prev_enable)
+            {
+                max_val += cactus_prev_[max_idx];
+            }
+        }
+        if (max_idx < 0 || counter_val > max_val)
+        {
+            cactus_tref_max_counter_idx_[rank] = static_cast<int32_t>(cactus_idx);
+        }
+    }
+
     if (counter_val >= threshold)
     {
         // Mirror the generic ABO behavior used by MOAT/mirza:
@@ -330,6 +353,30 @@ void ChannelState::dream_mitig()
     tusc_q_.erase(tusc_q_.begin());
 }
 
+void ChannelState::cactus_mitig_counter(int rank, uint32_t cactus_idx)
+{
+    if (config_.cactus_mode == 0) return;
+
+    // The counter represents one aggressor row in every bank of the rank.  For
+    // random CACTUS, get_cactus_row_idx reverses the per-bank permutation.
+    for (int j = 0; j < config_.bankgroups; j++)
+    {
+        for (int k = 0; k < config_.banks_per_group; k++)
+        {
+            uint32_t aggressor_rowid =
+                get_cactus_row_idx(rank, j, k, cactus_idx);
+            bank_states_[rank][j][k].cactus_mitig(aggressor_rowid);
+        }
+    }
+
+    cactus_prev_[cactus_idx] = cactus_[cactus_idx];
+    cactus_[cactus_idx] = 0;
+    if (cactus_tref_max_counter_idx_[rank] == static_cast<int32_t>(cactus_idx))
+    {
+        cactus_tref_max_counter_idx_[rank] = -1;
+    }
+}
+
 void ChannelState::cactus_mitig(int rank)
 {
     if (config_.cactus_mode == 0) return;
@@ -337,19 +384,59 @@ void ChannelState::cactus_mitig(int rank)
     int32_t cactus_idx = cactus_pending_counter_idx_[rank];
     if (cactus_idx < 0) return;
 
-    for (int j = 0; j < config_.bankgroups; j++)
-    {
-        for (int k = 0; k < config_.banks_per_group; k++)
-        {
-            uint32_t aggressor_rowid =
-                get_cactus_row_idx(rank, j, k, static_cast<uint32_t>(cactus_idx));
-            bank_states_[rank][j][k].cactus_mitig(aggressor_rowid);
-        }
-    }
-
-    cactus_prev_[cactus_idx] = cactus_[cactus_idx];
-    cactus_[cactus_idx] = 0;
+    cactus_mitig_counter(rank, static_cast<uint32_t>(cactus_idx));
     cactus_pending_counter_idx_[rank] = -1;
+}
+
+void ChannelState::cactus_tref_mitig(int rank)
+{
+    // Mode 0: if an ABO-triggered RFMab is already pending/in-flight when an
+    // REFab arrives, do the victim refresh work during the REFab window and
+    // cancel the standalone RFMab.
+    if (config_.cactus_mode == 0 || config_.tref_enable == 0 || config_.tref_mode != 0) return;
+    if (cactus_pending_counter_idx_[rank] < 0) return;
+    if (!cactus_alert_pending_[rank] && !cactus_rfm_inflight_[rank]) return;
+
+    cactus_mitig(rank);
+    cactus_alert_pending_[rank] = false;
+    cactus_rfm_inflight_[rank] = false;
+    cactus_acts_since_rfm_[rank] = 0;
+    RankNeedRFM(rank, false);
+    simple_stats_.Increment("num_tref_rfmab_skips");
+}
+
+void ChannelState::cactus_tref_max_mitig(int rank)
+{
+    // Mode 1: every tref_interval REFab commands, use the greedy max register
+    // to proactively mitigate the hottest live CACTUS counter.
+    if (config_.cactus_mode == 0 || config_.tref_enable == 0 || config_.tref_mode != 1) return;
+    if (config_.tref_interval <= 0) return;
+
+    cactus_tref_refab_count_[rank]++;
+    if (cactus_tref_refab_count_[rank] % config_.tref_interval != 0) return;
+
+    int32_t max_idx = cactus_tref_max_counter_idx_[rank];
+    if (max_idx < 0) return;
+
+    uint32_t max_val = cactus_[max_idx];
+    if (config_.cactus_prev_enable)
+    {
+        max_val += cactus_prev_[max_idx];
+    }
+    if (max_val == 0) return;
+
+    cactus_mitig_counter(rank, static_cast<uint32_t>(max_idx));
+
+    if (cactus_pending_counter_idx_[rank] == max_idx)
+    {
+        cactus_pending_counter_idx_[rank] = -1;
+        cactus_alert_pending_[rank] = false;
+        cactus_rfm_inflight_[rank] = false;
+        cactus_acts_since_rfm_[rank] = 0;
+        RankNeedRFM(rank, false);
+        simple_stats_.Increment("num_tref_rfmab_skips");
+    }
+    simple_stats_.Increment("num_tref_max_mitigs");
 }
 
 void ChannelState::abacus_mitig() 
@@ -364,12 +451,12 @@ void ChannelState::abacus_mitig()
     abacus_q_.erase(abacus_q_.begin());
 }
 
-void ChannelState::dream_refresh()
+void ChannelState::dream_refresh(bool should_reset)
 {    
     uint32_t factor = config_.dream_reset;
 
     // Just to dump stats
-    if (config_.dream_mode == 0 and ref_idx_ % (config_.refchunks / factor) == 0 and fgr_counter_ == 0)
+    if (config_.dream_mode == 0 and should_reset and ref_idx_ % (config_.refchunks / factor) == 0)
     {
         // Get quantiles from tusc_
         std::sort(tusc_.begin(), tusc_.end());
@@ -394,7 +481,7 @@ void ChannelState::dream_refresh()
         tusc_.clear();
         tusc_.resize(tusc_size_, 0);
     }
-    else if (config_.dream_mode == 1 and fgr_counter_ == 7)
+    else if (config_.dream_mode == 1 and should_reset)
     {
         simple_stats_.Increment(dream_resets_stat_);
 
@@ -409,33 +496,40 @@ void ChannelState::dream_refresh()
     }
 }
 
-void ChannelState::cactus_refresh(int rank)
+void ChannelState::cactus_refresh(int rank, bool should_reset)
 {
     if (config_.cactus_mode == 0) return;
+    if (!should_reset) return;
 
     uint32_t factor = config_.cactus_reset;
 
-    if (fgr_counter_ == 7)
-    {
-        simple_stats_.Increment(cactus_resets_stat_);
+    simple_stats_.Increment(cactus_resets_stat_);
 
-        uint32_t factored_ref_idx = ref_idx_ % (config_.refchunks / factor);
-        uint32_t rows_per_ref = factor * (cactus_size_ / config_.refchunks);
-        uint32_t base = rank * cactus_size_;
-        for (int i = 0; i < rows_per_ref; i++)
-        {
-            uint32_t index = base + factored_ref_idx * rows_per_ref + i;
-            cactus_prev_[index] = cactus_[index];
-            cactus_[index] = 0;
-        }
+    uint32_t factored_ref_idx = ref_idx_ % (config_.refchunks / factor);
+    uint32_t rows_per_ref = factor * (cactus_size_ / config_.refchunks);
+    uint32_t base = rank * cactus_size_;
+    for (int i = 0; i < rows_per_ref; i++)
+    {
+        uint32_t index = base + factored_ref_idx * rows_per_ref + i;
+        cactus_prev_[index] = cactus_[index];
+        cactus_[index] = 0;
+    }
+
+    int32_t max_idx = cactus_tref_max_counter_idx_[rank];
+    uint32_t reset_begin = base + factored_ref_idx * rows_per_ref;
+    uint32_t reset_end = reset_begin + rows_per_ref;
+    if (max_idx >= 0 && static_cast<uint32_t>(max_idx) >= reset_begin &&
+        static_cast<uint32_t>(max_idx) < reset_end)
+    {
+        cactus_tref_max_counter_idx_[rank] = -1;
     }
 }
 
-void ChannelState::abacus_refresh()
+void ChannelState::abacus_refresh(bool should_reset)
 {
     if (config_.abacus_mode == 0) return;
 
-    if (fgr_counter_ == 7)
+    if (should_reset)
     {
         uint32_t start = ref_idx_ % config_.refchunks;
         uint32_t abacus_rows_per_ref = abacus_entries_ / config_.refchunks;
@@ -1039,10 +1133,18 @@ void ChannelState::UpdateState(const Command& cmd, uint64_t clk)
             }
         } else if (cmd.IsRefresh()) {
             RankNeedRefresh(cmd.Rank(), false);
+            bool should_reset = cmd.cmd_type == CommandType::REFab ||
+                                (cmd.cmd_type == CommandType::REFsb &&
+                                 ((fgr_counter_ + 1) % (2 * config_.banks_per_group)) == 7);
+            dream_refresh(should_reset);
+            cactus_refresh(cmd.Rank(), should_reset);
+            abacus_refresh(should_reset);
+            if (cmd.cmd_type == CommandType::REFab)
+            {
+                cactus_tref_mitig(cmd.Rank());
+                cactus_tref_max_mitig(cmd.Rank());
+            }
             UpdateREFCounter(cmd);
-            dream_refresh();
-            cactus_refresh(cmd.Rank());
-            abacus_refresh();
         } else if (cmd.IsDRFM()) {
             RankNeedDRFM(cmd.Rank(), false);
             dream_mitig();
@@ -1064,10 +1166,13 @@ void ChannelState::UpdateState(const Command& cmd, uint64_t clk)
             BanksetNeedDRFM(cmd.Rank(), cmd.Bank(), false);
         } else if (cmd.IsRefresh()) {
             BanksetNeedRefresh(cmd.Rank(), cmd.Bank(), false);
+            bool should_reset = cmd.cmd_type == CommandType::REFab ||
+                                (cmd.cmd_type == CommandType::REFsb &&
+                                 ((fgr_counter_ + 1) % (2 * config_.banks_per_group)) == 7);
+            dream_refresh(should_reset);
+            cactus_refresh(cmd.Rank(), should_reset);
+            abacus_refresh(should_reset);
             UpdateREFCounter(cmd);
-            dream_refresh();
-            cactus_refresh(cmd.Rank());
-            abacus_refresh();
         }
     }
     else

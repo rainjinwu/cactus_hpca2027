@@ -123,7 +123,7 @@ class ChannelState {
     uint32_t get_tusc_idx(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t rowid) const;
     uint32_t get_row_idx(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t tuscid, uint32_t row_num) const;
     void dream_preact(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t rowid);
-    void dream_refresh();
+    void dream_refresh(bool should_reset);
     void dream_mitig();
 
     // [CACTUS]
@@ -138,12 +138,19 @@ class ChannelState {
     std::vector<uint64_t> cactus_last_alert_clk_;
     std::vector<bool> cactus_rfm_inflight_;
     std::vector<int> cactus_acts_since_rfm_;
+    std::vector<int> cactus_tref_refab_count_;
+    // One greedy register per rank: tracks the currently largest live CACTUS
+    // counter so REFab slack can mitigate it without scanning the whole table.
+    std::vector<int32_t> cactus_tref_max_counter_idx_;
     uint32_t get_cactus_bank_idx(uint32_t rank, uint32_t bankgroup, uint32_t bank) const;
     uint32_t get_cactus_idx(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t rowid) const;
     uint32_t get_cactus_row_idx(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t cactus_idx) const;
     void cactus_preact(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t rowid, uint64_t clk);
-    void cactus_refresh(int rank);
+    void cactus_refresh(int rank, bool should_reset);
+    void cactus_mitig_counter(int rank, uint32_t cactus_idx);
     void cactus_mitig(int rank);
+    void cactus_tref_mitig(int rank);
+    void cactus_tref_max_mitig(int rank);
 
     // [ABACUS]
     std::vector<ABACUS_Entry> abacus_table_;
@@ -151,7 +158,7 @@ class ChannelState {
     uint32_t abacus_entries_;
     std::string abacus_resets_stat_;
     void abacus_preact(uint32_t rank, uint32_t bankgroup, uint32_t bank, uint32_t rowid);
-    void abacus_refresh();
+    void abacus_refresh(bool should_reset);
     void abacus_mitig();
 
     // [ABO]

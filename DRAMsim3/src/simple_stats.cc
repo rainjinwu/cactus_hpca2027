@@ -41,6 +41,8 @@ SimpleStats::SimpleStats(const Config& config, int channel_id)
     InitStat("hbm_dual_cmds", "counter", "Number of cycles dual cmds issued");
     InitStat("num_rfmab_cmds", "counter", "Number of RFMAB commands"); // [RFM] Number RFMAB commands
     InitStat("num_rfmsb_cmds", "counter", "Number of RFMSB commands"); // [RFM] Number RFMSB commands
+    InitStat("num_tref_rfmab_skips", "counter", "Number of cactus RFMAB commands absorbed by REFab");
+    InitStat("num_tref_max_mitigs", "counter", "Number of proactive cactus max-counter mitigations during REFab");
     InitStat("num_alerts", "counter", "Number of ALERTs triggered"); // [ALERT] Number of ALERT commands
     InitStat("num_drfmab_cmds", "counter", "Number of DRFMAB commands"); // [DRFM] Number DRFMAB commands
     InitStat("num_drfmsb_cmds", "counter", "Number of DRFMSB commands"); // [DRFM] Number DRFMSB commands
